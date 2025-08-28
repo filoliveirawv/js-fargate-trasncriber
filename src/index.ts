@@ -1,0 +1,273 @@
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { type Readable } from "stream";
+import { IvschatClient, SendEventCommand } from "@aws-sdk/client-ivschat";
+import {
+  TranscribeStreamingClient,
+  StartStreamTranscriptionCommand,
+  type Result,
+} from "@aws-sdk/client-transcribe-streaming";
+
+type EnvVar = string | undefined;
+
+// Hard limit from Amazon Transcribe
+const MAX_CHUNK_SIZE = 32000;
+
+// -- TRANSCRIPTION SETUP  --
+const setupTranscription = async ({
+  transcribeClient,
+  audioStream,
+}: {
+  transcribeClient: TranscribeStreamingClient;
+  audioStream: Readable;
+}) => {
+  console.log("Setting up transcription...");
+
+  try {
+    const audioStreamGenerator = async function* () {
+      for await (const chunk of audioStream) {
+        let offset = 0;
+        while (offset < chunk.length) {
+          const end = Math.min(offset + MAX_CHUNK_SIZE, chunk.length);
+          yield { AudioEvent: { AudioChunk: chunk.slice(offset, end) } };
+          offset = end;
+        }
+      }
+    };
+
+    const command = new StartStreamTranscriptionCommand({
+      LanguageCode: "en-US",
+      MediaSampleRateHertz: 16000,
+      MediaEncoding: "pcm",
+      AudioStream: audioStreamGenerator(),
+    });
+
+    return await transcribeClient.send(command);
+  } catch (error) {
+    console.error("Error setting up transcription:", error);
+    throw error;
+  }
+};
+
+// -- FFMPEG SETUP --
+const setupFFmpeg = ({
+  playbackUrl,
+  playbackJWT,
+}: {
+  playbackUrl: string;
+  playbackJWT: string;
+}) => {
+  console.log("Setting up FFmpeg process...");
+
+  const ffmpegArgs: string[] = [
+    // -- Lowlatency Flags --
+    "-fflags",
+    "nobuffer",
+    // -- Reconnect Flags --
+    "-reconnect",
+    "1",
+    "-reconnect_streamed",
+    "1",
+    "-reconnect_delay_max",
+    "2",
+    // -- Standard Flags --
+    "-i",
+    `${playbackUrl}?token=${playbackJWT}`,
+    "-vn", // no video
+    "-acodec",
+    "pcm_s16le", // raw audio format
+    "-ar",
+    "16000", // 16kHz sample rate
+    "-ac",
+    "1", // mono channel
+    "-f",
+    "s16le", // Format for streaming
+    "pipe:1", // output to stdout
+  ];
+
+  const ffmpegProcess: ChildProcessWithoutNullStreams = spawn(
+    "ffmpeg",
+    ffmpegArgs
+  );
+
+  // we need to keep this to drain the buffer
+  // this keeps the pipeline open and the audio flowing
+  ffmpegProcess.stderr.on("data", (data: Buffer) => {});
+  ffmpegProcess.on("error", (error: Error) => {
+    console.error("FFmpeg process error:", error);
+  });
+  ffmpegProcess.on("close", (code: number) => {
+    if (code === 0) {
+      console.log("FFmpeg process completed successfully.");
+    } else {
+      console.warn(`FFmpeg process exited with code ${code}.`);
+    }
+  });
+
+  return ffmpegProcess;
+};
+
+//  -- TRANSCRIPT EVENT SENDER --
+const sendTranscriptEvent = async ({
+  ivsChatClient,
+  roomArn,
+  transcript,
+  firstResult,
+}: {
+  ivsChatClient: IvschatClient;
+  roomArn: string;
+  transcript: string;
+  firstResult: Result;
+}) => {
+  if (!firstResult.ResultId) {
+    console.error("Missing ResultId in firstResult.");
+    return;
+  }
+
+  const command = new SendEventCommand({
+    roomIdentifier: roomArn,
+    eventName: "Transcript Update",
+    attributes: {
+      transcript: transcript,
+      isPartial: String(firstResult.IsPartial),
+      resultId: firstResult.ResultId,
+    },
+  });
+
+  let attempts = 0;
+  const maxAttempts = 3;
+  while (attempts < maxAttempts) {
+    try {
+      await ivsChatClient.send(command);
+      return;
+    } catch (err) {
+      attempts++;
+      console.error(
+        `Failed to send IVS Chat event (attempt ${attempts}):`,
+        err
+      );
+      if (attempts >= maxAttempts) {
+        console.error("Giving up after 3 attempts.");
+      } else {
+        await new Promise((resolve) =>
+          setTimeout(resolve, 500 * 2 ** attempts)
+        );
+      }
+    }
+  }
+};
+
+// -- MAIN APPLICATION LOGIC --
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Promise Rejection:", reason);
+  process.exit(1);
+});
+
+const main = async () => {
+  console.log("-- Fargate Task Started --");
+
+  const playbackUrl: EnvVar = process.env.PLAYBACK_URL;
+  const awsRegion: EnvVar = process.env.AWS_REGION;
+  const ivsChatRoomArn: EnvVar = process.env.IVS_CHAT_ROOM_ARN;
+  const playbackJWT: EnvVar = process.env.PLAYBACK_JWT;
+
+  if (!playbackUrl || !ivsChatRoomArn || !awsRegion || !playbackJWT) {
+    console.error("Missing required environment variables.");
+    process.exit(1);
+  }
+
+  let ivsChatClient: IvschatClient | undefined;
+  let transcribeClient: TranscribeStreamingClient | undefined;
+  let ffmpegProcess: ChildProcessWithoutNullStreams | undefined;
+  const cleanup = async () => {
+    if (ffmpegProcess && !ffmpegProcess.killed) {
+      console.log("Cleaning up FFmpeg process...");
+      ffmpegProcess.kill("SIGTERM");
+    }
+    if (ivsChatClient) {
+      console.log("Destroying IVS Chat client...");
+      ivsChatClient.destroy();
+    }
+    if (transcribeClient) {
+      console.log("Destroying Transcribe client...");
+      transcribeClient.destroy();
+    }
+  };
+
+  process.on("SIGINT", async () => {
+    console.log("Received SIGINT. Shutting down gracefully...");
+    await cleanup();
+    process.exit(0);
+  });
+  process.on("SIGTERM", async () => {
+    console.log("Received SIGTERM. Shutting down gracefully...");
+    await cleanup();
+    process.exit(0);
+  });
+
+  // Init IVS Chat Client
+  try {
+    ivsChatClient = new IvschatClient({ region: awsRegion });
+  } catch (err) {
+    console.error("Failed to instantiate IVS Chat client:", err);
+    await cleanup();
+    process.exit(1);
+  }
+
+  // Init Transcribe Client
+  try {
+    transcribeClient = new TranscribeStreamingClient({ region: awsRegion });
+  } catch (err) {
+    console.error("Failed to instantiate Transcribe client:", err);
+    await cleanup();
+    process.exit(1);
+  }
+
+  // Start process
+  try {
+    ffmpegProcess = setupFFmpeg({ playbackUrl, playbackJWT });
+    const audioStream = ffmpegProcess.stdout;
+
+    const transcriptionResponse = await setupTranscription({
+      transcribeClient,
+      audioStream,
+    });
+
+    if (!transcriptionResponse.TranscriptResultStream) {
+      throw new Error("Failed to get a valid transcription response stream.");
+    }
+
+    for await (const event of transcriptionResponse.TranscriptResultStream) {
+      const results = event.TranscriptEvent?.Transcript?.Results;
+      if (
+        results &&
+        results.length > 0 &&
+        results[0].Alternatives &&
+        results[0].Alternatives.length > 0
+      ) {
+        const firstResult = results[0];
+        const firstAlternative =
+          firstResult.Alternatives && firstResult.Alternatives[0]
+            ? firstResult.Alternatives[0]
+            : null;
+        if (firstAlternative) {
+          const transcript = firstAlternative.Transcript;
+          if (transcript) {
+            sendTranscriptEvent({
+              ivsChatClient,
+              roomArn: ivsChatRoomArn,
+              transcript,
+              firstResult,
+            });
+          }
+        }
+      }
+    }
+    await cleanup();
+  } catch (error) {
+    console.error("A critical error occurred in the main process:", error);
+    await cleanup();
+    process.exit(1);
+  }
+};
+
+main();

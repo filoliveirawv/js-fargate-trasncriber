@@ -1,0 +1,22 @@
+{
+  "name": "js-fargate-trasncriber",
+  "version": "1.0.0",
+  "description": "Fargate task for live transcription",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ivschat": "^3.873.0",
+    "@aws-sdk/client-transcribe-streaming": "^3.873.0",
+    "ws": "^8.18.3"
+  }
+}
