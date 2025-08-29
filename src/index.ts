@@ -167,30 +167,45 @@ const sendTranscriptEvent = async ({
   }
 };
 
-// -- TRANSLATION FUNCTION --
-const translateText = async ({
+// -- TRANSLATE AND SEND EVENT
+const handleTranslation = async ({
+  ivsChatClient,
+  ivsChatRoomArn,
   translateClient,
-  text,
-  sourceLang,
-  targetLang,
+  transcript,
+  fromLang,
+  toLang,
+  firstResult,
 }: {
+  ivsChatClient: IvschatClient;
+  ivsChatRoomArn: string;
   translateClient: TranslateClient;
-  text: string;
-  sourceLang: string;
-  targetLang: string;
+  transcript: string;
+  fromLang: LanguageCode;
+  toLang: LanguageCode;
+  firstResult: Result;
 }) => {
+  let translatedText = transcript;
+
   try {
     const command = new TranslateTextCommand({
-      Text: text,
-      SourceLanguageCode: sourceLang,
-      TargetLanguageCode: targetLang,
+      Text: transcript,
+      SourceLanguageCode: fromLang,
+      TargetLanguageCode: toLang,
     });
     const response = await translateClient.send(command);
-    return response.TranslatedText || text;
+    translatedText = response.TranslatedText || transcript;
   } catch (error) {
     console.error("Error translating text:", error);
-    return text;
   }
+
+  sendTranscriptEvent({
+    ivsChatClient,
+    roomArn: ivsChatRoomArn,
+    transcript: translatedText,
+    firstResult,
+    languageCode: toLang,
+  });
 };
 
 // -- MAIN APPLICATION LOGIC --
@@ -323,19 +338,14 @@ const main = async () => {
             });
 
             if (needsTranslation && translateClient) {
-              const translatedText = await translateText({
-                translateClient,
-                text: transcript,
-                sourceLang: fromLang,
-                targetLang: toLang,
-              });
-
-              sendTranscriptEvent({
+              handleTranslation({
                 ivsChatClient,
-                roomArn: ivsChatRoomArn,
-                transcript: translatedText,
+                ivsChatRoomArn,
+                translateClient,
+                transcript,
+                fromLang,
+                toLang,
                 firstResult,
-                languageCode: toLang,
               });
             }
           }
