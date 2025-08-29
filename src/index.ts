@@ -5,20 +5,28 @@ import {
   TranscribeStreamingClient,
   StartStreamTranscriptionCommand,
   type Result,
+  type LanguageCode,
 } from "@aws-sdk/client-transcribe-streaming";
+import {
+  TranslateClient,
+  TranslateTextCommand,
+} from "@aws-sdk/client-translate";
 
 type EnvVar = string | undefined;
+type LanguageEnvVar = LanguageCode | undefined;
 
 // Hard limit from Amazon Transcribe
-const MAX_CHUNK_SIZE = 32000;
+const MAX_CHUNK_SIZE = 32_000;
 
 // -- TRANSCRIPTION SETUP  --
 const setupTranscription = async ({
   transcribeClient,
   audioStream,
+  languageCode,
 }: {
   transcribeClient: TranscribeStreamingClient;
   audioStream: Readable;
+  languageCode: LanguageCode;
 }) => {
   console.log("Setting up transcription...");
 
@@ -35,7 +43,7 @@ const setupTranscription = async ({
     };
 
     const command = new StartStreamTranscriptionCommand({
-      LanguageCode: "en-US",
+      LanguageCode: languageCode,
       MediaSampleRateHertz: 16000,
       MediaEncoding: "pcm",
       AudioStream: audioStreamGenerator(),
@@ -112,11 +120,13 @@ const sendTranscriptEvent = async ({
   roomArn,
   transcript,
   firstResult,
+  languageCode,
 }: {
   ivsChatClient: IvschatClient;
   roomArn: string;
   transcript: string;
   firstResult: Result;
+  languageCode: LanguageCode;
 }) => {
   if (!firstResult.ResultId) {
     console.error("Missing ResultId in firstResult.");
@@ -130,6 +140,7 @@ const sendTranscriptEvent = async ({
       transcript: transcript,
       isPartial: String(firstResult.IsPartial),
       resultId: firstResult.ResultId,
+      languageCode: languageCode,
     },
   });
 
@@ -156,6 +167,32 @@ const sendTranscriptEvent = async ({
   }
 };
 
+// -- TRANSLATION FUNCTION --
+const translateText = async ({
+  translateClient,
+  text,
+  sourceLang,
+  targetLang,
+}: {
+  translateClient: TranslateClient;
+  text: string;
+  sourceLang: string;
+  targetLang: string;
+}) => {
+  try {
+    const command = new TranslateTextCommand({
+      Text: text,
+      SourceLanguageCode: sourceLang,
+      TargetLanguageCode: targetLang,
+    });
+    const response = await translateClient.send(command);
+    return response.TranslatedText || text;
+  } catch (error) {
+    console.error("Error translating text:", error);
+    return text;
+  }
+};
+
 // -- MAIN APPLICATION LOGIC --
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Promise Rejection:", reason);
@@ -169,6 +206,10 @@ const main = async () => {
   const awsRegion: EnvVar = process.env.AWS_REGION;
   const ivsChatRoomArn: EnvVar = process.env.IVS_CHAT_ROOM_ARN;
   const playbackJWT: EnvVar = process.env.PLAYBACK_JWT;
+  const fromLang: LanguageEnvVar =
+    (process.env.FROM_LANG as LanguageCode) || "en-IE";
+  const toLang: LanguageEnvVar =
+    (process.env.TO_LANG as LanguageCode) || "en-IE";
 
   if (!playbackUrl || !ivsChatRoomArn || !awsRegion || !playbackJWT) {
     console.error("Missing required environment variables.");
@@ -178,6 +219,8 @@ const main = async () => {
   let ivsChatClient: IvschatClient | undefined;
   let transcribeClient: TranscribeStreamingClient | undefined;
   let ffmpegProcess: ChildProcessWithoutNullStreams | undefined;
+  let translateClient: TranslateClient | undefined;
+
   const cleanup = async () => {
     if (ffmpegProcess && !ffmpegProcess.killed) {
       console.log("Cleaning up FFmpeg process...");
@@ -190,6 +233,10 @@ const main = async () => {
     if (transcribeClient) {
       console.log("Destroying Transcribe client...");
       transcribeClient.destroy();
+    }
+    if (translateClient) {
+      console.log("Destroying Translate client...");
+      translateClient.destroy();
     }
   };
 
@@ -222,6 +269,20 @@ const main = async () => {
     process.exit(1);
   }
 
+  // Init Translate Client
+  const needsTranslation = fromLang !== toLang;
+  if (needsTranslation) {
+    console.log("Setting up translation...");
+    try {
+      // init translate client
+      translateClient = new TranslateClient({ region: awsRegion });
+    } catch (err) {
+      console.error("Failed to instantiate Translate client:", err);
+      await cleanup();
+      process.exit(1);
+    }
+  }
+
   // Start process
   try {
     ffmpegProcess = setupFFmpeg({ playbackUrl, playbackJWT });
@@ -230,6 +291,7 @@ const main = async () => {
     const transcriptionResponse = await setupTranscription({
       transcribeClient,
       audioStream,
+      languageCode: fromLang,
     });
 
     if (!transcriptionResponse.TranscriptResultStream) {
@@ -257,7 +319,25 @@ const main = async () => {
               roomArn: ivsChatRoomArn,
               transcript,
               firstResult,
+              languageCode: fromLang,
             });
+
+            if (needsTranslation && translateClient) {
+              const translatedText = await translateText({
+                translateClient,
+                text: transcript,
+                sourceLang: fromLang,
+                targetLang: toLang,
+              });
+
+              sendTranscriptEvent({
+                ivsChatClient,
+                roomArn: ivsChatRoomArn,
+                transcript: translatedText,
+                firstResult,
+                languageCode: toLang,
+              });
+            }
           }
         }
       }
