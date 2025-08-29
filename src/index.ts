@@ -11,6 +11,7 @@ import {
   TranslateClient,
   TranslateTextCommand,
 } from "@aws-sdk/client-translate";
+import axios from "axios";
 
 type EnvVar = string | undefined;
 type LanguageEnvVar = LanguageCode | undefined;
@@ -114,6 +115,51 @@ const setupFFmpeg = ({
   return ffmpegProcess;
 };
 
+const saveTranscriptToDB = async ({
+  transcript,
+  languageCode,
+  apiToken,
+  apiUrl,
+}: {
+  transcript: string;
+  languageCode: string;
+  apiToken: string;
+  apiUrl: string;
+}) => {
+  if (!apiUrl || !apiToken) {
+    console.error("Missing Laravel API environment variables.");
+    return;
+  }
+
+  try {
+    await axios.post(
+      apiUrl,
+      { transcript, languageCode },
+      {
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          Accept: "application/json",
+        },
+      }
+    );
+    console.log("Successfully saved transcript");
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      console.error(
+        "Failed to save transcript to DB (Axios Error):",
+        error.response?.data || error.message
+      );
+    } else if (error instanceof Error) {
+      console.error("Failed to save transcript to DB (Error):", error.message);
+    } else {
+      console.error(
+        "An unknown error occurred while saving transcript:",
+        error
+      );
+    }
+  }
+};
+
 //  -- TRANSCRIPT EVENT SENDER --
 const sendTranscriptEvent = async ({
   ivsChatClient,
@@ -176,6 +222,8 @@ const handleTranslation = async ({
   fromLang,
   toLang,
   firstResult,
+  apiToken,
+  apiUrl,
 }: {
   ivsChatClient: IvschatClient;
   ivsChatRoomArn: string;
@@ -184,6 +232,8 @@ const handleTranslation = async ({
   fromLang: LanguageCode;
   toLang: LanguageCode;
   firstResult: Result;
+  apiToken: string;
+  apiUrl: string;
 }) => {
   let translatedText = transcript;
 
@@ -206,6 +256,15 @@ const handleTranslation = async ({
     firstResult,
     languageCode: toLang,
   });
+
+  if (!firstResult.IsPartial) {
+    saveTranscriptToDB({
+      transcript,
+      languageCode: toLang,
+      apiToken,
+      apiUrl,
+    });
+  }
 };
 
 // -- MAIN APPLICATION LOGIC --
@@ -225,8 +284,17 @@ const main = async () => {
     (process.env.FROM_LANG as LanguageCode) || "en-IE";
   const toLang: LanguageEnvVar =
     (process.env.TO_LANG as LanguageCode) || "en-IE";
+  const laravelAPIEndpoint: EnvVar = process.env.LARAVEL_API_ENDPOINT;
+  const laravelAPIToken: EnvVar = process.env.LARAVEL_API_TOKEN;
 
-  if (!playbackUrl || !ivsChatRoomArn || !awsRegion || !playbackJWT) {
+  if (
+    !playbackUrl ||
+    !ivsChatRoomArn ||
+    !awsRegion ||
+    !playbackJWT ||
+    !laravelAPIEndpoint ||
+    !laravelAPIToken
+  ) {
     console.error("Missing required environment variables.");
     process.exit(1);
   }
@@ -336,6 +404,14 @@ const main = async () => {
               firstResult,
               languageCode: fromLang,
             });
+            if (!firstResult.IsPartial) {
+              saveTranscriptToDB({
+                transcript,
+                languageCode: fromLang,
+                apiToken: laravelAPIToken,
+                apiUrl: laravelAPIEndpoint,
+              });
+            }
 
             if (needsTranslation && translateClient) {
               handleTranslation({
@@ -346,6 +422,8 @@ const main = async () => {
                 fromLang,
                 toLang,
                 firstResult,
+                apiToken: laravelAPIToken,
+                apiUrl: laravelAPIEndpoint,
               });
             }
           }
