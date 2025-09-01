@@ -277,7 +277,9 @@ const main = async () => {
   console.log("-- Fargate Task Started --");
 
   const playbackUrl: EnvVar = process.env.PLAYBACK_URL;
-  const awsRegion: EnvVar = process.env.AWS_REGION;
+  const awsIVSRegion: EnvVar = process.env.AWS_IVS_REGION;
+  const awsTranscribeRegion: EnvVar = process.env.AWS_TRANSCRIBE_REGION;
+  const awsTranslateRegion: EnvVar = process.env.AWS_TRANSLATE_REGION;
   const ivsChatRoomArn: EnvVar = process.env.IVS_CHAT_ROOM_ARN;
   const playbackJWT: EnvVar = process.env.PLAYBACK_JWT;
   const fromLang: LanguageEnvVar =
@@ -290,7 +292,9 @@ const main = async () => {
   if (
     !playbackUrl ||
     !ivsChatRoomArn ||
-    !awsRegion ||
+    !awsIVSRegion ||
+    !awsTranscribeRegion ||
+    !awsTranslateRegion ||
     !playbackJWT ||
     !laravelAPIEndpoint ||
     !laravelAPIToken
@@ -336,7 +340,7 @@ const main = async () => {
 
   // Init IVS Chat Client
   try {
-    ivsChatClient = new IvschatClient({ region: awsRegion });
+    ivsChatClient = new IvschatClient({ region: awsIVSRegion });
   } catch (err) {
     console.error("Failed to instantiate IVS Chat client:", err);
     await cleanup();
@@ -345,7 +349,9 @@ const main = async () => {
 
   // Init Transcribe Client
   try {
-    transcribeClient = new TranscribeStreamingClient({ region: awsRegion });
+    transcribeClient = new TranscribeStreamingClient({
+      region: awsTranscribeRegion,
+    });
   } catch (err) {
     console.error("Failed to instantiate Transcribe client:", err);
     await cleanup();
@@ -358,7 +364,7 @@ const main = async () => {
     console.log("Setting up translation...");
     try {
       // init translate client
-      translateClient = new TranslateClient({ region: awsRegion });
+      translateClient = new TranslateClient({ region: awsTranslateRegion });
     } catch (err) {
       console.error("Failed to instantiate Translate client:", err);
       await cleanup();
