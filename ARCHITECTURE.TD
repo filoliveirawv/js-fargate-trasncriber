@@ -1,6 +1,3 @@
-# RTMPS Transcription Architecture
-
-```mermaid
 graph TD
     subgraph "User & Viewer"
         A["Broadcasting Software <br> (OBS)"]
@@ -52,11 +49,10 @@ graph TD
 
     J -- "11.Sends Event to Chat" --> E
     E -- "Pushes to Viewer via WebSocket" --> B
-
+    
     J -- "12.Fetches JWT Secret" --> N
     J -- "13.Generates JWT & Calls API" --> I
     I -- "14.Verifies JWT using secret from" --> N
     I -- "15.Saves transcript" --> H
 
     B -- "Watches Video" --> D
-```
