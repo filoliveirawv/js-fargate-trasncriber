@@ -1,6 +1,4 @@
-# My Application Architecture
-
-Here is the complete workflow for the live transcription service.
+# RTMPS Transcription Architecture
 
 ```mermaid
 graph TD
