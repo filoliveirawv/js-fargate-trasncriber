@@ -12,6 +12,7 @@ import {
   TranslateTextCommand,
 } from "@aws-sdk/client-translate";
 import axios from "axios";
+import { IvsClient, PutMetadataCommand } from "@aws-sdk/client-ivs";
 
 type EnvVar = string | undefined;
 
@@ -172,27 +173,102 @@ const saveTranscriptToDB = async ({
   }
 };
 
+// -- PUT TRANSCRIPT IN METADATA --
+const putTranscriptInMetadata = async ({
+  ivsClient,
+  ivsArn,
+  transcript,
+  languageCode,
+  messageId,
+}: {
+  ivsClient: IvsClient;
+  ivsArn: string;
+  transcript: string;
+  languageCode: LanguageCode;
+  messageId: string;
+}) => {
+  const input = {
+    channelArn: ivsArn,
+    metadata: JSON.stringify({
+      type: "RTMP Transcription",
+      transcript,
+      languageCode,
+      messageId,
+    }),
+  };
+  const command = new PutMetadataCommand(input);
+
+  let attempts = 0;
+  const maxAttempts = 3;
+  while (attempts < maxAttempts) {
+    try {
+      await ivsClient.send(command);
+      return;
+    } catch (err) {
+      attempts++;
+      console.error(`Failed to send IVS metadata (attempt ${attempts}):`, err);
+      if (attempts >= maxAttempts) {
+        console.error("Giving up after 3 attempts.");
+      } else {
+        await new Promise((resolve) =>
+          setTimeout(resolve, 500 * 2 ** attempts)
+        );
+      }
+    }
+  }
+};
+
 //  -- TRANSCRIPT EVENT SENDER --
 const sendTranscriptEvent = async ({
   ivsChatClient,
-  roomArn,
+  ivsChatRoomArn,
   transcript,
   firstResult,
   languageCode,
+  ivsClient,
+  ivsArn,
+  domain,
+  livestreamID,
+  taskStartTime,
 }: {
   ivsChatClient: IvschatClient;
-  roomArn: string;
+  ivsChatRoomArn: string;
   transcript: string;
   firstResult: Result;
   languageCode: LanguageCode;
+  ivsClient: IvsClient;
+  ivsArn: string;
+  domain?: string;
+  livestreamID: string;
+  taskStartTime: number;
 }) => {
   if (!firstResult.ResultId) {
     console.error("Missing ResultId in firstResult.");
     return;
   }
 
+  if (!firstResult.IsPartial) {
+    putTranscriptInMetadata({
+      ivsClient,
+      ivsArn,
+      transcript,
+      languageCode,
+      messageId: firstResult.ResultId,
+    });
+
+    saveTranscriptToDB({
+      transcript,
+      languageCode,
+      domain,
+      livestreamID,
+      startTime: firstResult.StartTime,
+      endTime: firstResult.EndTime,
+      taskStartTime,
+    });
+  }
+
   const command = new SendEventCommand({
-    roomIdentifier: roomArn,
+    roomIdentifier: ivsChatRoomArn,
     eventName: "Transcript Update",
     attributes: {
       transcript: transcript,
@@ -237,6 +313,8 @@ const handleTranslation = async ({
   domain,
   livestreamID,
   taskStartTime,
+  ivsClient,
+  ivsArn,
 }: {
   ivsChatClient: IvschatClient;
   ivsChatRoomArn: string;
@@ -248,6 +326,8 @@ const handleTranslation = async ({
   domain?: string;
   livestreamID: string;
   taskStartTime: number;
+  ivsClient: IvsClient;
+  ivsArn: string;
 }) => {
   let translatedText = transcript;
 
@@ -265,23 +345,16 @@ const handleTranslation = async ({
 
   sendTranscriptEvent({
     ivsChatClient,
-    roomArn: ivsChatRoomArn,
+    ivsChatRoomArn,
     transcript: translatedText,
     firstResult,
     languageCode: toLang,
+    ivsClient,
+    ivsArn,
+    domain,
+    livestreamID,
+    taskStartTime,
   });
-
-  if (!firstResult.IsPartial) {
-    saveTranscriptToDB({
-      transcript: translatedText,
-      languageCode: toLang,
-      domain,
-      livestreamID,
-      startTime: firstResult.StartTime,
-      endTime: firstResult.EndTime,
-      taskStartTime,
-    });
-  }
 };
 
 // -- MAIN APPLICATION LOGIC --
@@ -298,6 +371,7 @@ const main = async () => {
   const awsIVSRegion: EnvVar = process.env.AWS_IVS_REGION;
   const awsTranscribeRegion: EnvVar = process.env.AWS_TRANSCRIBE_REGION;
   const awsTranslateRegion: EnvVar = process.env.AWS_TRANSLATE_REGION;
+  const ivsArn: EnvVar = process.env.IVS_ARN;
   const ivsChatRoomArn: EnvVar = process.env.IVS_CHAT_ROOM_ARN;
   const livestreamID: EnvVar = process.env.LIVESTREAM_ID;
   const playbackJWT: EnvVar = process.env.PLAYBACK_JWT;
@@ -315,13 +389,15 @@ const main = async () => {
     !awsTranscribeRegion ||
     !awsTranslateRegion ||
     !playbackJWT ||
-    !livestreamID
+    !livestreamID ||
+    !ivsArn
   ) {
     console.error("Missing required environment variables.");
     process.exit(1);
   }
 
   let ivsChatClient: IvschatClient | undefined;
+  let ivsClient: IvsClient | undefined;
   let transcribeClient: TranscribeStreamingClient | undefined;
   let ffmpegProcess: ChildProcessWithoutNullStreams | undefined;
   let translateClient: TranslateClient | undefined;
@@ -343,6 +419,10 @@ const main = async () => {
       console.log("Destroying Translate client...");
       translateClient.destroy();
     }
+    if (ivsClient) {
+      console.log("Destroying IVS client...");
+      ivsClient.destroy();
+    }
   };
 
   process.on("SIGINT", async () => {
@@ -361,6 +441,15 @@ const main = async () => {
     ivsChatClient = new IvschatClient({ region: awsIVSRegion });
   } catch (err) {
     console.error("Failed to instantiate IVS Chat client:", err);
+    await cleanup();
+    process.exit(1);
+  }
+
+  // Init IVS Client
+  try {
+    ivsClient = new IvsClient({ region: awsIVSRegion });
+  } catch (err) {
+    console.error("Failed to instantiate IVS client:", err);
     await cleanup();
     process.exit(1);
   }
@@ -423,22 +512,16 @@ const main = async () => {
           if (transcript) {
             sendTranscriptEvent({
               ivsChatClient,
-              roomArn: ivsChatRoomArn,
+              ivsChatRoomArn,
               transcript,
               firstResult,
               languageCode: fromLang,
+              ivsClient,
+              ivsArn,
+              domain,
+              livestreamID,
+              taskStartTime,
             });
-            if (!firstResult.IsPartial) {
-              saveTranscriptToDB({
-                transcript,
-                languageCode: fromLang,
-                domain,
-                livestreamID,
-                startTime: firstResult.StartTime,
-                endTime: firstResult.EndTime,
-                taskStartTime,
-              });
-            }
 
             if (needsTranslation && translateClient) {
               for (const toLang of toLangs) {
@@ -454,6 +537,8 @@ const main = async () => {
                     domain,
                     livestreamID,
                     taskStartTime,
+                    ivsClient,
+                    ivsArn,
                   });
                 }
               }

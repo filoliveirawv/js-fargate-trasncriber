@@ -15,6 +15,7 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@aws-sdk/client-ivs": "^3.879.0",
     "@aws-sdk/client-ivschat": "^3.873.0",
     "@aws-sdk/client-transcribe-streaming": "^3.873.0",
     "@aws-sdk/client-translate": "^3.876.0",
