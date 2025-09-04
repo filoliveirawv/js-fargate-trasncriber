@@ -14,7 +14,6 @@ import {
 import axios from "axios";
 
 type EnvVar = string | undefined;
-type LanguageEnvVar = LanguageCode | undefined;
 
 // Hard limit from Amazon Transcribe
 const MAX_CHUNK_SIZE = 32_000;
@@ -133,7 +132,7 @@ const saveTranscriptToDB = async ({
   taskStartTime: number;
 }) => {
   if (!domain) {
-    console.warn("No domain provided, skipping transcript saving.");
+    // console.warn("No domain provided, skipping transcript saving.");
     return;
   }
   try {
@@ -302,10 +301,11 @@ const main = async () => {
   const ivsChatRoomArn: EnvVar = process.env.IVS_CHAT_ROOM_ARN;
   const livestreamID: EnvVar = process.env.LIVESTREAM_ID;
   const playbackJWT: EnvVar = process.env.PLAYBACK_JWT;
-  const fromLang: LanguageEnvVar =
+  const fromLang: LanguageCode =
     (process.env.FROM_LANG as LanguageCode) || "en-IE";
-  const toLang: LanguageEnvVar =
-    (process.env.TO_LANG as LanguageCode) || "en-IE";
+  const toLangs: LanguageCode[] = process.env.TO_LANGS
+    ? (process.env.TO_LANGS.split(",") as LanguageCode[])
+    : ["en-IE"];
   const domain: EnvVar = process.env.DOMAIN;
 
   if (
@@ -377,7 +377,7 @@ const main = async () => {
   }
 
   // Init Translate Client
-  const needsTranslation = fromLang !== toLang;
+  const needsTranslation = toLangs.some((lang) => lang !== fromLang);
   if (needsTranslation) {
     console.log("Setting up translation...");
     try {
@@ -441,18 +441,22 @@ const main = async () => {
             }
 
             if (needsTranslation && translateClient) {
-              handleTranslation({
-                ivsChatClient,
-                ivsChatRoomArn,
-                translateClient,
-                transcript,
-                fromLang,
-                toLang,
-                firstResult,
-                domain,
-                livestreamID,
-                taskStartTime,
-              });
+              for (const toLang of toLangs) {
+                if (fromLang !== toLang) {
+                  await handleTranslation({
+                    ivsChatClient,
+                    ivsChatRoomArn,
+                    translateClient,
+                    transcript,
+                    fromLang,
+                    toLang,
+                    firstResult,
+                    domain,
+                    livestreamID,
+                    taskStartTime,
+                  });
+                }
+              }
             }
           }
         }
