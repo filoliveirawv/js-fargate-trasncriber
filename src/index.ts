@@ -69,20 +69,20 @@ const setupFFmpeg = ({
   playbackUrl,
   playbackPrivateKey,
   playbackJWTAlgorithm,
-  ivsArn,
+  ivsChannelArn,
   domain,
 }: {
   playbackUrl: string;
   playbackPrivateKey: string;
   playbackJWTAlgorithm: jwt.Algorithm;
-  ivsArn: string;
+  ivsChannelArn: string;
   domain: string;
 }) => {
   console.log("Setting up FFmpeg process...");
 
   // Generate JWT
   const payload = {
-    "aws:channel-arn": ivsArn,
+    "aws:channel-arn": ivsChannelArn,
     "aws:access-control-allow-origin": domain,
     exp: Math.floor(Date.now() / 1000) + 24 * 60 * 60, // 24 hours from now
   };
@@ -197,19 +197,19 @@ const saveTranscriptToDB = async ({
 // -- PUT TRANSCRIPT IN METADATA --
 const putTranscriptInMetadata = async ({
   ivsClient,
-  ivsArn,
+  ivsChannelArn,
   transcript,
   languageCode,
   messageId,
 }: {
   ivsClient: IvsClient;
-  ivsArn: string;
+  ivsChannelArn: string;
   transcript: string;
   languageCode: LanguageCode;
   messageId: string;
 }) => {
   const input = {
-    channelArn: ivsArn,
+    channelArn: ivsChannelArn,
     metadata: JSON.stringify({
       type: "RTMP Transcription",
       transcript,
@@ -247,7 +247,7 @@ const sendTranscriptEvent = async ({
   firstResult,
   languageCode,
   ivsClient,
-  ivsArn,
+  ivsChannelArn,
   domain,
   livestreamID,
   taskStartTime,
@@ -258,7 +258,7 @@ const sendTranscriptEvent = async ({
   firstResult: Result;
   languageCode: LanguageCode;
   ivsClient: IvsClient;
-  ivsArn: string;
+  ivsChannelArn: string;
   domain?: string;
   livestreamID: string;
   taskStartTime: number;
@@ -271,7 +271,7 @@ const sendTranscriptEvent = async ({
   if (!firstResult.IsPartial) {
     putTranscriptInMetadata({
       ivsClient,
-      ivsArn,
+      ivsChannelArn,
       transcript,
       languageCode,
       messageId: firstResult.ResultId,
@@ -335,7 +335,7 @@ const handleTranslation = async ({
   livestreamID,
   taskStartTime,
   ivsClient,
-  ivsArn,
+  ivsChannelArn,
 }: {
   ivsChatClient: IvschatClient;
   ivsChatRoomArn: string;
@@ -348,7 +348,7 @@ const handleTranslation = async ({
   livestreamID: string;
   taskStartTime: number;
   ivsClient: IvsClient;
-  ivsArn: string;
+  ivsChannelArn: string;
 }) => {
   let translatedText = transcript;
 
@@ -371,7 +371,7 @@ const handleTranslation = async ({
     firstResult,
     languageCode: toLang,
     ivsClient,
-    ivsArn,
+    ivsChannelArn,
     domain,
     livestreamID,
     taskStartTime,
@@ -385,7 +385,7 @@ process.on("unhandledRejection", (reason, promise) => {
 });
 
 const main = async () => {
-  console.log("-- Fargate Worker Task Starting --");
+  console.log("-- Fargate worker started --");
 
   let ivsChatClient: IvschatClient | undefined;
   let ivsClient: IvsClient | undefined;
@@ -440,7 +440,7 @@ const main = async () => {
   let shuttingDown = false;
 
   while (!shuttingDown) {
-    console.log("-- Fargate Worker Task Starting --");
+    console.log("-- Fargate pulling --");
     let messageReceiptHandle: string | undefined;
 
     try {
@@ -461,22 +461,22 @@ const main = async () => {
         console.log("-- Transcription Started --");
         const taskStartTime = Date.now();
 
-        const playbackUrl: EnvVar = jobData.PLAYBACK_URL;
-        const awsIVSRegion: EnvVar = jobData.AWS_IVS_REGION;
-        const awsTranscribeRegion: EnvVar = jobData.AWS_TRANSCRIBE_REGION;
-        const awsTranslateRegion: EnvVar = jobData.AWS_TRANSLATE_REGION;
-        const ivsArn: EnvVar = jobData.IVS_ARN;
-        const ivsChatRoomArn: EnvVar = jobData.IVS_CHAT_ROOM_ARN;
-        const livestreamID: EnvVar = jobData.LIVESTREAM_ID;
-        const playbackPrivateKey: EnvVar = jobData.PLAYBACK_PRIVATE_KEY;
+        const playbackUrl: EnvVar = jobData.playbackUrl;
+        const awsIVSRegion: EnvVar = jobData.awsIVSRegion;
+        const awsTranscribeRegion: EnvVar = jobData.awsTranscribeRegion;
+        const awsTranslateRegion: EnvVar = jobData.awsTranslateRegion;
+        const ivsChannelArn: EnvVar = jobData.ivsChannelArn;
+        const ivsChatRoomArn: EnvVar = jobData.ivsChatRoomArn;
+        const livestreamID: EnvVar = jobData.livestreamID;
+        const playbackPrivateKey: EnvVar = jobData.playbackPrivateKey;
         const playbackJWTAlgorithm: jwt.Algorithm =
-          (jobData.PLAYBACK_JWT_ALGORITHM as jwt.Algorithm) || "ES384";
+          (jobData.playbackJWTAlgorithm as jwt.Algorithm) || "ES384";
         const fromLang: LanguageCode =
-          (jobData.FROM_LANG as LanguageCode) || "en-IE";
-        const toLangs: LanguageCode[] = jobData.TO_LANGS
-          ? (jobData.TO_LANGS.split(",") as LanguageCode[])
+          (jobData.fromLang as LanguageCode) || "en-IE";
+        const toLangs: LanguageCode[] = jobData.toLangs
+          ? (jobData.toLangs as LanguageCode[])
           : ["en-IE"];
-        const domain: EnvVar = jobData.DOMAIN;
+        const domain: EnvVar = jobData.domain;
 
         if (
           !playbackUrl ||
@@ -487,7 +487,7 @@ const main = async () => {
           !playbackPrivateKey ||
           !playbackJWTAlgorithm ||
           !livestreamID ||
-          !ivsArn ||
+          !ivsChannelArn ||
           !domain
         ) {
           console.error("Missing required job data.", {
@@ -498,7 +498,7 @@ const main = async () => {
             awsTranslateRegion,
             playbackPrivateKey,
             livestreamID,
-            ivsArn,
+            ivsChannelArn,
             domain,
           });
           await cleanup();
@@ -556,7 +556,7 @@ const main = async () => {
             playbackUrl,
             playbackPrivateKey,
             playbackJWTAlgorithm,
-            ivsArn,
+            ivsChannelArn,
             domain,
           });
           const audioStream = ffmpegProcess.stdout;
@@ -601,7 +601,7 @@ const main = async () => {
                     firstResult,
                     languageCode: fromLang,
                     ivsClient,
-                    ivsArn,
+                    ivsChannelArn,
                     domain,
                     livestreamID,
                     taskStartTime,
@@ -610,7 +610,7 @@ const main = async () => {
                   if (needsTranslation && translateClient) {
                     for (const toLang of toLangs) {
                       if (fromLang !== toLang) {
-                        await handleTranslation({
+                        handleTranslation({
                           ivsChatClient,
                           ivsChatRoomArn,
                           translateClient,
@@ -622,7 +622,7 @@ const main = async () => {
                           livestreamID,
                           taskStartTime,
                           ivsClient,
-                          ivsArn,
+                          ivsChannelArn,
                         });
                       }
                     }
