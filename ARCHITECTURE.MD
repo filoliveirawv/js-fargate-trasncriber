@@ -32,10 +32,6 @@ graph TD
         TRANSLATE["Translate Service"]
     end
 
-    subgraph "Security & Authentication"
-        CSMS["Zoom CSMS Bridge <br> (Holds JWT Secret)"]
-    end
-
     subgraph "Job Queue"
         SQS[SQS Jobs Queue]
     end
@@ -56,12 +52,11 @@ graph TD
     TRANSLATE -- "11. Returns Translation" --> FARGATE_TASK
 
     FARGATE_TASK -- "12. Sends IVS Chat Event" --> IVS_CHATROOM
-    FARGATE_TASK -- "13. Injects Timed Metadata" --> IVS_CHANNEL
-    FARGATE_TASK -- "14. Calls API to Save Transcript" --> ENDPOINT
+    FARGATE_TASK -- "14. Injects Timed Metadata" --> IVS_CHANNEL
+    FARGATE_TASK -- "15. Calls API to Save Transcript" --> ENDPOINT
 
-    IVS_CHATROOM -- "15. Pushes Event to Viewer" --> VIEWER
-    ENDPOINT -- "16. Verifies JWT via" --> CSMS
-    ENDPOINT -- "17. Saves to DB" --> DB
+    IVS_CHATROOM -- "13. Pushes Event to Viewer" --> VIEWER
+    ENDPOINT -- "16. Saves to DB" --> DB
 
     VIEWER -- "Watches IVS Video Stream" --> IVS_CHANNEL
 ```
