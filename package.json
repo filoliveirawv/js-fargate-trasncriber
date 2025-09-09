@@ -18,6 +18,7 @@
   "dependencies": {
     "@aws-sdk/client-ivs": "^3.879.0",
     "@aws-sdk/client-ivschat": "^3.873.0",
+    "@aws-sdk/client-sqs": "^3.883.0",
     "@aws-sdk/client-transcribe-streaming": "^3.873.0",
     "@aws-sdk/client-translate": "^3.876.0",
     "axios": "^1.11.0",

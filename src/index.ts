@@ -1,3 +1,9 @@
+import {
+  SQSClient,
+  ReceiveMessageCommand,
+  DeleteMessageCommand,
+} from "@aws-sdk/client-sqs";
+
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { type Readable } from "stream";
 import { IvschatClient, SendEventCommand } from "@aws-sdk/client-ivschat";
@@ -378,220 +384,249 @@ process.on("unhandledRejection", (reason, promise) => {
   process.exit(1);
 });
 
+const sqsClient = new SQSClient({ region: process.env.AWS_REGION });
+const queueUrl = process.env.SQS_QUEUE_URL;
+
 const main = async () => {
-  console.log("-- Fargate Task Started --");
-  const taskStartTime = Date.now();
+  console.log("Task started. Polling for jobs...");
 
-  const playbackUrl: EnvVar = process.env.PLAYBACK_URL;
-  const awsIVSRegion: EnvVar = process.env.AWS_IVS_REGION;
-  const awsTranscribeRegion: EnvVar = process.env.AWS_TRANSCRIBE_REGION;
-  const awsTranslateRegion: EnvVar = process.env.AWS_TRANSLATE_REGION;
-  const ivsArn: EnvVar = process.env.IVS_ARN;
-  const ivsChatRoomArn: EnvVar = process.env.IVS_CHAT_ROOM_ARN;
-  const livestreamID: EnvVar = process.env.LIVESTREAM_ID;
-  const playbackPrivateKey: EnvVar = process.env.PLAYBACK_PRIVATE_KEY;
-  const playbackJWTAlgorithm: jwt.Algorithm =
-    (process.env.PLAYBACK_JWT_ALGORITHM as jwt.Algorithm) || "ES384";
-  const fromLang: LanguageCode =
-    (process.env.FROM_LANG as LanguageCode) || "en-IE";
-  const toLangs: LanguageCode[] = process.env.TO_LANGS
-    ? (process.env.TO_LANGS.split(",") as LanguageCode[])
-    : ["en-IE"];
-  const domain: EnvVar = process.env.DOMAIN;
-
-  if (
-    !playbackUrl ||
-    !ivsChatRoomArn ||
-    !awsIVSRegion ||
-    !awsTranscribeRegion ||
-    !awsTranslateRegion ||
-    !playbackPrivateKey ||
-    !playbackJWTAlgorithm ||
-    !livestreamID ||
-    !ivsArn ||
-    !domain
-  ) {
-    console.error("Missing required environment variables.", {
-      playbackUrl,
-      ivsChatRoomArn,
-      awsIVSRegion,
-      awsTranscribeRegion,
-      awsTranslateRegion,
-      playbackPrivateKey,
-      livestreamID,
-      ivsArn,
-      domain,
-    });
+  // validate env vars aws region and sqs-queue-url
+  if (!process.env.AWS_REGION || !process.env.SQS_QUEUE_URL) {
+    console.error("Missing required environment variables.");
     process.exit(1);
   }
 
-  let ivsChatClient: IvschatClient | undefined;
-  let ivsClient: IvsClient | undefined;
-  let transcribeClient: TranscribeStreamingClient | undefined;
-  let ffmpegProcess: ChildProcessWithoutNullStreams | undefined;
-  let translateClient: TranslateClient | undefined;
-
-  const cleanup = async () => {
-    if (ffmpegProcess && !ffmpegProcess.killed) {
-      console.log("Cleaning up FFmpeg process...");
-      ffmpegProcess.kill("SIGTERM");
-    }
-    if (ivsChatClient) {
-      console.log("Destroying IVS Chat client...");
-      ivsChatClient.destroy();
-    }
-    if (transcribeClient) {
-      console.log("Destroying Transcribe client...");
-      transcribeClient.destroy();
-    }
-    if (translateClient) {
-      console.log("Destroying Translate client...");
-      translateClient.destroy();
-    }
-    if (ivsClient) {
-      console.log("Destroying IVS client...");
-      ivsClient.destroy();
-    }
-  };
-
-  process.on("SIGINT", async () => {
-    console.log("Received SIGINT. Shutting down gracefully...");
-    await cleanup();
-    process.exit(0);
-  });
-  process.on("SIGTERM", async () => {
-    console.log("Received SIGTERM. Shutting down gracefully...");
-    await cleanup();
-    process.exit(0);
-  });
-
-  // Init IVS Chat Client
-  try {
-    ivsChatClient = new IvschatClient({ region: awsIVSRegion });
-  } catch (err) {
-    console.error("Failed to instantiate IVS Chat client:", err);
-    await cleanup();
-    process.exit(1);
-  }
-
-  // Init IVS Client
-  try {
-    ivsClient = new IvsClient({ region: awsIVSRegion });
-  } catch (err) {
-    console.error("Failed to instantiate IVS client:", err);
-    await cleanup();
-    process.exit(1);
-  }
-
-  // Init Transcribe Client
-  try {
-    transcribeClient = new TranscribeStreamingClient({
-      region: awsTranscribeRegion,
+  while (true) {
+    const receiveCommand = new ReceiveMessageCommand({
+      QueueUrl: queueUrl,
+      MaxNumberOfMessages: 1,
+      WaitTimeSeconds: 20,
     });
-  } catch (err) {
-    console.error("Failed to instantiate Transcribe client:", err);
-    await cleanup();
-    process.exit(1);
-  }
+    const { Messages } = await sqsClient.send(receiveCommand);
 
-  // Init Translate Client
-  const needsTranslation = toLangs.some((lang) => lang !== fromLang);
-  if (needsTranslation) {
-    console.log("Setting up translation...");
-    try {
-      // init translate client
-      translateClient = new TranslateClient({ region: awsTranslateRegion });
-    } catch (err) {
-      console.error("Failed to instantiate Translate client:", err);
-      await cleanup();
-      process.exit(1);
-    }
-  }
+    if (Messages && Messages.length > 0) {
+      const message = Messages[0];
+      const jobData = JSON.parse(message.Body!);
 
-  // Start process
-  try {
-    ffmpegProcess = setupFFmpeg({
-      playbackUrl,
-      playbackPrivateKey,
-      playbackJWTAlgorithm,
-      ivsArn,
-      domain,
-    });
-    const audioStream = ffmpegProcess.stdout;
+      console.log("Job received:", jobData.livestreamId);
 
-    const transcriptionResponse = await setupTranscription({
-      transcribeClient,
-      audioStream,
-      languageCode: fromLang,
-    });
+      console.log("-- Fargate Task Started --");
+      const taskStartTime = Date.now();
 
-    if (!transcriptionResponse.TranscriptResultStream) {
-      throw new Error("Failed to get a valid transcription response stream.");
-    }
+      const playbackUrl: EnvVar = jobData.PLAYBACK_URL;
+      const awsIVSRegion: EnvVar = jobData.AWS_IVS_REGION;
+      const awsTranscribeRegion: EnvVar = jobData.AWS_TRANSCRIBE_REGION;
+      const awsTranslateRegion: EnvVar = jobData.AWS_TRANSLATE_REGION;
+      const ivsArn: EnvVar = jobData.IVS_ARN;
+      const ivsChatRoomArn: EnvVar = jobData.IVS_CHAT_ROOM_ARN;
+      const livestreamID: EnvVar = jobData.LIVESTREAM_ID;
+      const playbackPrivateKey: EnvVar = jobData.PLAYBACK_PRIVATE_KEY;
+      const playbackJWTAlgorithm: jwt.Algorithm =
+        (jobData.PLAYBACK_JWT_ALGORITHM as jwt.Algorithm) || "ES384";
+      const fromLang: LanguageCode =
+        (jobData.FROM_LANG as LanguageCode) || "en-IE";
+      const toLangs: LanguageCode[] = jobData.TO_LANGS
+        ? (jobData.TO_LANGS.split(",") as LanguageCode[])
+        : ["en-IE"];
+      const domain: EnvVar = jobData.DOMAIN;
 
-    const badWordsFilter = new Filter();
-
-    for await (const event of transcriptionResponse.TranscriptResultStream) {
-      const results = event.TranscriptEvent?.Transcript?.Results;
       if (
-        results &&
-        results.length > 0 &&
-        results[0].Alternatives &&
-        results[0].Alternatives.length > 0
+        !playbackUrl ||
+        !ivsChatRoomArn ||
+        !awsIVSRegion ||
+        !awsTranscribeRegion ||
+        !awsTranslateRegion ||
+        !playbackPrivateKey ||
+        !playbackJWTAlgorithm ||
+        !livestreamID ||
+        !ivsArn ||
+        !domain
       ) {
-        const firstResult = results[0];
-        const firstAlternative =
-          firstResult.Alternatives && firstResult.Alternatives[0]
-            ? firstResult.Alternatives[0]
-            : null;
-        if (firstAlternative) {
-          const transcript = firstAlternative.Transcript;
+        console.error("Missing required job data.", {
+          playbackUrl,
+          ivsChatRoomArn,
+          awsIVSRegion,
+          awsTranscribeRegion,
+          awsTranslateRegion,
+          playbackPrivateKey,
+          livestreamID,
+          ivsArn,
+          domain,
+        });
+        process.exit(1);
+      }
 
-          if (transcript) {
-            const cleanTranscript = badWordsFilter.clean(transcript);
+      let ivsChatClient: IvschatClient | undefined;
+      let ivsClient: IvsClient | undefined;
+      let transcribeClient: TranscribeStreamingClient | undefined;
+      let ffmpegProcess: ChildProcessWithoutNullStreams | undefined;
+      let translateClient: TranslateClient | undefined;
 
-            sendTranscriptEvent({
-              ivsChatClient,
-              ivsChatRoomArn,
-              transcript: cleanTranscript,
-              firstResult,
-              languageCode: fromLang,
-              ivsClient,
-              ivsArn,
-              domain,
-              livestreamID,
-              taskStartTime,
-            });
+      const cleanup = async () => {
+        if (ffmpegProcess && !ffmpegProcess.killed) {
+          console.log("Cleaning up FFmpeg process...");
+          ffmpegProcess.kill("SIGTERM");
+        }
+        if (ivsChatClient) {
+          console.log("Destroying IVS Chat client...");
+          ivsChatClient.destroy();
+        }
+        if (transcribeClient) {
+          console.log("Destroying Transcribe client...");
+          transcribeClient.destroy();
+        }
+        if (translateClient) {
+          console.log("Destroying Translate client...");
+          translateClient.destroy();
+        }
+        if (ivsClient) {
+          console.log("Destroying IVS client...");
+          ivsClient.destroy();
+        }
+      };
 
-            if (needsTranslation && translateClient) {
-              for (const toLang of toLangs) {
-                if (fromLang !== toLang) {
-                  await handleTranslation({
-                    ivsChatClient,
-                    ivsChatRoomArn,
-                    translateClient,
-                    transcript: cleanTranscript,
-                    fromLang,
-                    toLang,
-                    firstResult,
-                    domain,
-                    livestreamID,
-                    taskStartTime,
-                    ivsClient,
-                    ivsArn,
-                  });
+      process.on("SIGINT", async () => {
+        console.log("Received SIGINT. Shutting down gracefully...");
+        await cleanup();
+        process.exit(0);
+      });
+      process.on("SIGTERM", async () => {
+        console.log("Received SIGTERM. Shutting down gracefully...");
+        await cleanup();
+        process.exit(0);
+      });
+
+      // Init IVS Chat Client
+      try {
+        ivsChatClient = new IvschatClient({ region: awsIVSRegion });
+      } catch (err) {
+        console.error("Failed to instantiate IVS Chat client:", err);
+        await cleanup();
+        process.exit(1);
+      }
+
+      // Init IVS Client
+      try {
+        ivsClient = new IvsClient({ region: awsIVSRegion });
+      } catch (err) {
+        console.error("Failed to instantiate IVS client:", err);
+        await cleanup();
+        process.exit(1);
+      }
+
+      // Init Transcribe Client
+      try {
+        transcribeClient = new TranscribeStreamingClient({
+          region: awsTranscribeRegion,
+        });
+      } catch (err) {
+        console.error("Failed to instantiate Transcribe client:", err);
+        await cleanup();
+        process.exit(1);
+      }
+
+      // Init Translate Client
+      const needsTranslation = toLangs.some((lang) => lang !== fromLang);
+      if (needsTranslation) {
+        console.log("Setting up translation...");
+        try {
+          // init translate client
+          translateClient = new TranslateClient({ region: awsTranslateRegion });
+        } catch (err) {
+          console.error("Failed to instantiate Translate client:", err);
+          await cleanup();
+          process.exit(1);
+        }
+      }
+
+      // Start process
+      try {
+        ffmpegProcess = setupFFmpeg({
+          playbackUrl,
+          playbackPrivateKey,
+          playbackJWTAlgorithm,
+          ivsArn,
+          domain,
+        });
+        const audioStream = ffmpegProcess.stdout;
+
+        const transcriptionResponse = await setupTranscription({
+          transcribeClient,
+          audioStream,
+          languageCode: fromLang,
+        });
+
+        if (!transcriptionResponse.TranscriptResultStream) {
+          throw new Error(
+            "Failed to get a valid transcription response stream."
+          );
+        }
+
+        const badWordsFilter = new Filter();
+
+        for await (const event of transcriptionResponse.TranscriptResultStream) {
+          const results = event.TranscriptEvent?.Transcript?.Results;
+          if (
+            results &&
+            results.length > 0 &&
+            results[0].Alternatives &&
+            results[0].Alternatives.length > 0
+          ) {
+            const firstResult = results[0];
+            const firstAlternative =
+              firstResult.Alternatives && firstResult.Alternatives[0]
+                ? firstResult.Alternatives[0]
+                : null;
+            if (firstAlternative) {
+              const transcript = firstAlternative.Transcript;
+
+              if (transcript) {
+                const cleanTranscript = badWordsFilter.clean(transcript);
+
+                sendTranscriptEvent({
+                  ivsChatClient,
+                  ivsChatRoomArn,
+                  transcript: cleanTranscript,
+                  firstResult,
+                  languageCode: fromLang,
+                  ivsClient,
+                  ivsArn,
+                  domain,
+                  livestreamID,
+                  taskStartTime,
+                });
+
+                if (needsTranslation && translateClient) {
+                  for (const toLang of toLangs) {
+                    if (fromLang !== toLang) {
+                      await handleTranslation({
+                        ivsChatClient,
+                        ivsChatRoomArn,
+                        translateClient,
+                        transcript: cleanTranscript,
+                        fromLang,
+                        toLang,
+                        firstResult,
+                        domain,
+                        livestreamID,
+                        taskStartTime,
+                        ivsClient,
+                        ivsArn,
+                      });
+                    }
+                  }
                 }
               }
             }
           }
         }
+        await cleanup();
+      } catch (error) {
+        console.error("A critical error occurred in the main process:", error);
+        await cleanup();
+        process.exit(1);
       }
     }
-    await cleanup();
-  } catch (error) {
-    console.error("A critical error occurred in the main process:", error);
-    await cleanup();
-    process.exit(1);
   }
 };
 
