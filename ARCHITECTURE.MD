@@ -3,62 +3,65 @@
 ```mermaid
 graph TD
     subgraph "User & Viewer"
-        A["Broadcasting Software <br> (OBS)"]
-        B["Viewer's Web Browser"]
+        ENCODER["Broadcasting Software <br> (OBS)"]
+        VIEWER["Viewer's Web Browser"]
     end
 
     subgraph "AWS IVS Platform"
-        C["IVS Ingest Endpoint"]
-        D["Amazon IVS Channel"]
-        E["IVS Chat Room"]
+        IVS_INGEST["IVS Ingest Endpoint"]
+        IVS_CHANNEL["Amazon IVS Channel"]
+        IVS_CHATROOM["IVS Chat Room"]
     end
 
     subgraph "WV Backend"
-        F["AwsEventBridgeController <br> Catches 'Stream Start' event"]
-        H["livestream_transcriptions"]
-        I["WV API Endpoint <br> /livestreams-v2/${livestreamID}/rtmps-transcription"]
+        CONTROLLER["AwsEventBridgeController <br> Catches 'Stream Start' event"]
+        DB["livestream_transcriptions"]
+        ENDPOINT["WV API Endpoint <br> /livestreams-v2/${livestreamID}/rtmps-transcription"]
     end
 
     subgraph "AWS Fargate (Worker Task)"
-        J["Fargate Task <br> (Node.js/TypeScript)"]
-        K["FFmpeg Audio Extraction"]
+        FARGATE_TASK["Fargate Task <br> (Node)"]
+        FFMPEG["FFmpeg"]
     end
 
     subgraph "AWS Transcribe"
-        L["Transcription Service"]
+        TRANSCRIBE["Transcription Service"]
     end
 
     subgraph "AWS Translate"
-        M["Translate Service"]
+        TRANSLATE["Translate Service"]
     end
 
     subgraph "Security & Authentication"
-        N["Zoom CSMS Bridge <br> (Holds JWT Secret)"]
+        CSMS["Zoom CSMS Bridge <br> (Holds JWT Secret)"]
+    end
+
+    subgraph "Job Queue"
+        SQS[SQS Jobs Queue]
     end
 
     %% --- The Flow ---
 
-    A -- "1.Sends RTMP Stream" --> C
-    C -- "2.Streams Data" --> D
-    D -- "3.Emits 'Stream Start' Event" --> F
-    F -- "4.Starts Task with Vars" --> J
+    ENCODER -- "1. Sends RTMP Stream" --> IVS_INGEST
+    IVS_INGEST -- "2. Streams Data" --> IVS_CHANNEL
+    IVS_CHANNEL -- "3. Emits 'Stream Start' Event" --> CONTROLLER
+    CONTROLLER -- "4. Adds job to queue with Vars" --> SQS
+    FARGATE_TASK -- "5. Pulls job from queue" --> SQS
 
-    J -- "5.Connects to Playback URL" --> D
-    J -- "6.Spawns FFmpeg" --> K
-    K -- "7.Pipes Audio Stream" --> L
-    L -- "8.Sends Transcript" --> J
-    J -- "9.(Optional) Sends for Translation" --> M
-    M -- "10.Returns Translation" --> J
+    FARGATE_TASK -- "6. Connects to Playback URL" --> IVS_CHANNEL
+    FARGATE_TASK -- "7. Spawns FFmpeg" --> FFMPEG
+    FFMPEG -- "8. Pipes Audio Stream" --> TRANSCRIBE
+    TRANSCRIBE -- "9. Returns Transcript" --> FARGATE_TASK
+    FARGATE_TASK -- "10. (Optional) Translates Transcript" --> TRANSLATE
+    TRANSLATE -- "11. Returns Translation" --> FARGATE_TASK
 
-    J -- "11.Sends Event to Chat" --> E
-    E -- "Pushes to Viewer via WebSocket" --> B
+    FARGATE_TASK -- "12. Sends IVS Chat Event" --> IVS_CHATROOM
+    FARGATE_TASK -- "13. Injects Timed Metadata" --> IVS_CHANNEL
+    FARGATE_TASK -- "14. Calls API to Save Transcript" --> ENDPOINT
 
-    J -- "12.Puts Metadata" --> D
+    IVS_CHATROOM -- "15. Pushes Event to Viewer" --> VIEWER
+    ENDPOINT -- "16. Verifies JWT via" --> CSMS
+    ENDPOINT -- "17. Saves to DB" --> DB
 
-    J -- "13.Fetches JWT Secret" --> N
-    J -- "14.Generates JWT & Calls API" --> I
-    I -- "15.Verifies JWT using secret from" --> N
-    I -- "16.Saves transcript" --> H
-
-    B -- "Watches Video" --> D
+    VIEWER -- "Watches IVS Video Stream" --> IVS_CHANNEL
 ```
