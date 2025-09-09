@@ -11,7 +11,8 @@ import {
   TranslateClient,
   TranslateTextCommand,
 } from "@aws-sdk/client-translate";
-import axios from "axios";
+import { Filter } from "bad-words";
+import jwt from "jsonwebtoken";
 import { IvsClient, PutMetadataCommand } from "@aws-sdk/client-ivs";
 
 type EnvVar = string | undefined;
@@ -60,12 +61,28 @@ const setupTranscription = async ({
 // -- FFMPEG SETUP --
 const setupFFmpeg = ({
   playbackUrl,
-  playbackJWT,
+  playbackPrivateKey,
+  playbackJWTAlgorithm,
+  ivsArn,
+  domain,
 }: {
   playbackUrl: string;
-  playbackJWT: string;
+  playbackPrivateKey: string;
+  playbackJWTAlgorithm: jwt.Algorithm;
+  ivsArn: string;
+  domain: string;
 }) => {
   console.log("Setting up FFmpeg process...");
+
+  // Generate JWT
+  const payload = {
+    "aws:channel-arn": ivsArn,
+    "aws:access-control-allow-origin": domain,
+    exp: Math.floor(Date.now() / 1000) + 24 * 60 * 60, // 24 hours from now
+  };
+  const playbackJWT = jwt.sign(payload, playbackPrivateKey, {
+    algorithm: playbackJWTAlgorithm,
+  });
 
   const ffmpegArgs: string[] = [
     // -- Lowlatency Flags --
@@ -132,45 +149,43 @@ const saveTranscriptToDB = async ({
   endTime: number | undefined;
   taskStartTime: number;
 }) => {
-  if (!domain) {
-    // console.warn("No domain provided, skipping transcript saving.");
-    return;
-  }
-  try {
-    await axios.post(
-      `https://${domain}/api/livestreams-v2/${livestreamID}/rtmps-transcription`,
-      {
-        transcript,
-        language_code: languageCode,
-        start_time: startTime ?? Date.now() - taskStartTime,
-        end_time: endTime,
-      },
-      {
-        headers: {
-          // "X-Xsrf-Token": test,
-          Accept: "application/json",
-          // Cookie:
-          // testing
-          // "remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d=eyJpdiI6ImF1NVBhRjNIaTNYRzdyMFZ0MC9yalE9PSIsInZhbHVlIjoiOGJOMXBZaEVLTHlhbi9udVdJNnpFUFRTeGMyLzV3TUsrQ2ZySTVJbzlMb3J2V0hGMythWTRxWTdXRUdpaVJKWWx6blQ4R2VUcHBYZ3ZGcmQycHJYcWtiSFNRdE5nalJMTHVlWjZ3WDRIb1dPZVNXZU1vOEZSbXcvNkFqY0gvOTVCQ0tlN3hIRlhQK25uVGtocCtkWW9iUmt2Z08yckZUNDg4K2dTd3duays2b0paODZIeUg3Ykp0WTBNV2kxR21nbzhEbXY0bkx4cmUybDBzcDNpTHJ4dG1jeCtjM211NE5Hb3haWm9EeGhVND0iLCJtYWMiOiJjMGZmZTM5NTM2NTdhMTQ3ODNlODFhZjViNzA3MTdjY2UxNmM5ZTEzNjEyYTQxNjVlMTk5YTM4MDAyOGQyNzMyIiwidGFnIjoiIn0%3D; laravel_token=eyJpdiI6Im45d2pCODN4a0EyWFB0MVlCWENEbXc9PSIsInZhbHVlIjoiSVZKaVNSRFlmNEkvSDJTQWJTQzJWWVJhZzVUMEZuYS9WWGZUMzUzcktxZ3BXV1V5dW9LMDJDdnZEKy9TbDlLVm9iaitlUEpNUUZ2d1ZTVFJhanJCek91dmpkeG5QNkc1TlhzVHc3bWlOYTZST1VUQkhLL0lJQmpieG5qbXA1WUtKcVhaUVVtT3lRMkxuOHRZKytVcjV0QnBXOHUrTlY3ZXByQlRvMHNrS1pBTG9QT25MMFdMVlU5c08vSDhObUhxNE5uUEFrdis3dllzSy9LVWhTUXJ3QVBQUndncUE3NU9WUzI0V1ZDcUhia2RWYjkwMDNlMDBRRWZHMDY5QjhDTTA3S0Q0ZFpTUCtWRFNkd2FCQW5BcjdrOTJNMXErQjRHallvSW0yL2ZlY3lGaEVhcHlXZ2tCazdPMWZON3hpRkJrMEt3NlRNTmpOeExiemtHcW84eHEyNkdRVVNqQUdJY1lSMWZBU3VwamdiakhuYTFQckhqTzlFMUZUYkl0dk9SV21ad204M09yVS94UEg2MGc2Qlh1YnNqbjkyYlE5WGF0cWt2aGVGVU9pSFUrSGVHUGw2KzVEMkdCMXJIZkxBdGllbEkvcklQaHdJTndDd1B4MmhoZHJ5ZktWR0pUanVmd3BLZG0wWS80ckdldlkvdlNqM2I3RUNwV29hQ1VTTHZvZE5RQVBnMkFFS3MvK3pqMk1iK1dQdDVGbVZyeVRlb1o3dEl5MmhpdDNlRVd1aVBReUxiOXNXSHlXVFd4WUpUNXczRTdQUFYwSmllNStJemdlb1c0UUFMb3NoZ1RRd3FOWmxweTJGWnpieG5ZRnhPSUVtY1RhbVJtTWpsd3RGTGRhcXMwK1NKZWxnTjhzVnYwK1YxWVA4TkEzamt1M0NtTFROUi9qQTVnWmRBMjVOSVc2aE45ZW5IZGNFbG81NFEycUdiU0VzN05uRVZEcTFIdEpWN1VQc0l3Z2I3dDY4b0d3RnJnakg4UUNtTjYydmI0Vnp0THdRdTV3R1Y1OFU5WFdQcXhnSFIyMXhSRnkxUVR1cldJQT09IiwibWFjIjoiOWMxMDk2NDQyNmE3OTQxZmQ0ZjhkZWI0YTRlMzVmMDNhNGFhYzdkNzNhNjcyMjI2MjAwNWU3NmMwNmQ4NThhYiIsInRhZyI6IiJ9; XSRF-TOKEN=eyJpdiI6IjlUajhnL2dFMStMendiQlBUZ1VBMlE9PSIsInZhbHVlIjoieVA0UHBQNGliTXcrdTBnSDhzL1lFRk1EQlU1NmtRRWVvRk0ydW9BVVh6M3U5aHVlSFVkOS9GYXJWaUFFRGtYZE1ac2ZlbFAvVzFnUnBudDJjYU05ckM2WXRpWkRYODl0aGg5QzFEYi9ERXg5Z0FadXhRVmZXbTNOQ0VRTjBXeGUiLCJtYWMiOiJkNzkyOTVkYjAzYTNiZDQzNTk4MGUyNGJkYjI1MmY2MzBiNjM3ZmJhMDM3NDk4YjY4MDk1M2YxYmQyYWE3YzBjIiwidGFnIjoiIn0%3D; workvivo_session=eyJpdiI6ImFmZWtmamlzSTdXamt5dVRTY21SOVE9PSIsInZhbHVlIjoieUJTcEFHd1RKMW5uNjFBVkJpdnRrUHRCSmNqTmNMTWJLaWkyOU9QbHYzcWVqU3VINENlZGRqSkN4eVNHTXArbzRuQkZwRExTcGJ4OUZzdC9pQWdMemVHSGtyaVMzVWgxeEI1MEN0UEJpUTFqTzhiQXByTnMzUGdJbU1ySGVQZ1EiLCJtYWMiOiIwYjE0MTRmMzQwOTdiZTdmZGI3NDAxZWVkZWI0MDc0YzgxN2IyN2NmMTY0M2Q0ZGZjZTZmZWU1ZWI1ZDQwMTJhIiwidGFnIjoiIn0%3D; x-clockwork=%7B%22requestId%22%3A%221756740918-7397-530711230%22%2C%22version%22%3A%225.3.1%22%2C%22path%22%3A%22%5C%2F__clockwork%5C%2F%22%2C%22webPath%22%3A%22%5C%2Fclockwork%5C%2Fapp%22%2C%22token%22%3A%2253b06eee%22%2C%22metrics%22%3Atrue%2C%22toolbar%22%3Atrue%7D",
-        },
-      }
-    );
-    console.log("Successfully saved transcript");
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      console.error(
-        "Failed to save transcript to DB (Axios Error):",
-        error.response?.data || error.message
-      );
-    } else if (error instanceof Error) {
-      console.error("Failed to save transcript to DB (Error):", error.message);
-    } else {
-      console.error(
-        "An unknown error occurred while saving transcript:",
-        error
-      );
-    }
-  }
+  // console.warn("No domain provided, skipping transcript saving.");
+  return;
+  //   try {
+  //     await axios.post(
+  //       `https://${domain}/api/livestreams-v2/${livestreamID}/rtmps-transcription`,
+  //       {
+  //         transcript,
+  //         language_code: languageCode,
+  //         start_time: startTime ?? Date.now() - taskStartTime,
+  //         end_time: endTime,
+  //       },
+  //       {
+  //         headers: {
+  //           // "X-Xsrf-Token": test,
+  //           Accept: "application/json",
+  //           // Cookie:
+  //           // testing
+  //           // "remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d=eyJpdiI6ImF1NVBhRjNIaTNYRzdyMFZ0MC9yalE9PSIsInZhbHVlIjoiOGJOMXBZaEVLTHlhbi9udVdJNnpFUFRTeGMyLzV3TUsrQ2ZySTVJbzlMb3J2V0hGMythWTRxWTdXRUdpaVJKWWx6blQ4R2VUcHBYZ3ZGcmQycHJYcWtiSFNRdE5nalJMTHVlWjZ3WDRIb1dPZVNXZU1vOEZSbXcvNkFqY0gvOTVCQ0tlN3hIRlhQK25uVGtocCtkWW9iUmt2Z08yckZUNDg4K2dTd3duays2b0paODZIeUg3Ykp0WTBNV2kxR21nbzhEbXY0bkx4cmUybDBzcDNpTHJ4dG1jeCtjM211NE5Hb3haWm9EeGhVND0iLCJtYWMiOiJjMGZmZTM5NTM2NTdhMTQ3ODNlODFhZjViNzA3MTdjY2UxNmM5ZTEzNjEyYTQxNjVlMTk5YTM4MDAyOGQyNzMyIiwidGFnIjoiIn0%3D; laravel_token=eyJpdiI6Im45d2pCODN4a0EyWFB0MVlCWENEbXc9PSIsInZhbHVlIjoiSVZKaVNSRFlmNEkvSDJTQWJTQzJWWVJhZzVUMEZuYS9WWGZUMzUzcktxZ3BXV1V5dW9LMDJDdnZEKy9TbDlLVm9iaitlUEpNUUZ2d1ZTVFJhanJCek91dmpkeG5QNkc1TlhzVHc3bWlOYTZST1VUQkhLL0lJQmpieG5qbXA1WUtKcVhaUVVtT3lRMkxuOHRZKytVcjV0QnBXOHUrTlY3ZXByQlRvMHNrS1pBTG9QT25MMFdMVlU5c08vSDhObUhxNE5uUEFrdis3dllzSy9LVWhTUXJ3QVBQUndncUE3NU9WUzI0V1ZDcUhia2RWYjkwMDNlMDBRRWZHMDY5QjhDTTA3S0Q0ZFpTUCtWRFNkd2FCQW5BcjdrOTJNMXErQjRHallvSW0yL2ZlY3lGaEVhcHlXZ2tCazdPMWZON3hpRkJrMEt3NlRNTmpOeExiemtHcW84eHEyNkdRVVNqQUdJY1lSMWZBU3VwamdiakhuYTFQckhqTzlFMUZUYkl0dk9SV21ad204M09yVS94UEg2MGc2Qlh1YnNqbjkyYlE5WGF0cWt2aGVGVU9pSFUrSGVHUGw2KzVEMkdCMXJIZkxBdGllbEkvcklQaHdJTndDd1B4MmhoZHJ5ZktWR0pUanVmd3BLZG0wWS80ckdldlkvdlNqM2I3RUNwV29hQ1VTTHZvZE5RQVBnMkFFS3MvK3pqMk1iK1dQdDVGbVZyeVRlb1o3dEl5MmhpdDNlRVd1aVBReUxiOXNXSHlXVFd4WUpUNXczRTdQUFYwSmllNStJemdlb1c0UUFMb3NoZ1RRd3FOWmxweTJGWnpieG5ZRnhPSUVtY1RhbVJtTWpsd3RGTGRhcXMwK1NKZWxnTjhzVnYwK1YxWVA4TkEzamt1M0NtTFROUi9qQTVnWmRBMjVOSVc2aE45ZW5IZGNFbG81NFEycUdiU0VzN05uRVZEcTFIdEpWN1VQc0l3Z2I3dDY4b0d3RnJnakg4UUNtTjYydmI0Vnp0THdRdTV3R1Y1OFU5WFdQcXhnSFIyMXhSRnkxUVR1cldJQT09IiwibWFjIjoiOWMxMDk2NDQyNmE3OTQxZmQ0ZjhkZWI0YTRlMzVmMDNhNGFhYzdkNzNhNjcyMjI2MjAwNWU3NmMwNmQ4NThhYiIsInRhZyI6IiJ9; XSRF-TOKEN=eyJpdiI6IjlUajhnL2dFMStMendiQlBUZ1VBMlE9PSIsInZhbHVlIjoieVA0UHBQNGliTXcrdTBnSDhzL1lFRk1EQlU1NmtRRWVvRk0ydW9BVVh6M3U5aHVlSFVkOS9GYXJWaUFFRGtYZE1ac2ZlbFAvVzFnUnBudDJjYU05ckM2WXRpWkRYODl0aGg5QzFEYi9ERXg5Z0FadXhRVmZXbTNOQ0VRTjBXeGUiLCJtYWMiOiJkNzkyOTVkYjAzYTNiZDQzNTk4MGUyNGJkYjI1MmY2MzBiNjM3ZmJhMDM3NDk4YjY4MDk1M2YxYmQyYWE3YzBjIiwidGFnIjoiIn0%3D; workvivo_session=eyJpdiI6ImFmZWtmamlzSTdXamt5dVRTY21SOVE9PSIsInZhbHVlIjoieUJTcEFHd1RKMW5uNjFBVkJpdnRrUHRCSmNqTmNMTWJLaWkyOU9QbHYzcWVqU3VINENlZGRqSkN4eVNHTXArbzRuQkZwRExTcGJ4OUZzdC9pQWdMemVHSGtyaVMzVWgxeEI1MEN0UEJpUTFqTzhiQXByTnMzUGdJbU1ySGVQZ1EiLCJtYWMiOiIwYjE0MTRmMzQwOTdiZTdmZGI3NDAxZWVkZWI0MDc0YzgxN2IyN2NmMTY0M2Q0ZGZjZTZmZWU1ZWI1ZDQwMTJhIiwidGFnIjoiIn0%3D; x-clockwork=%7B%22requestId%22%3A%221756740918-7397-530711230%22%2C%22version%22%3A%225.3.1%22%2C%22path%22%3A%22%5C%2F__clockwork%5C%2F%22%2C%22webPath%22%3A%22%5C%2Fclockwork%5C%2Fapp%22%2C%22token%22%3A%2253b06eee%22%2C%22metrics%22%3Atrue%2C%22toolbar%22%3Atrue%7D",
+  //         },
+  //       }
+  //     );
+  //     console.log("Successfully saved transcript");
+  //   } catch (error) {
+  //     if (axios.isAxiosError(error)) {
+  //       console.error(
+  //         "Failed to save transcript to DB (Axios Error):",
+  //         error.response?.data || error.message
+  //       );
+  //     } else if (error instanceof Error) {
+  //       console.error("Failed to save transcript to DB (Error):", error.message);
+  //     } else {
+  //       console.error(
+  //         "An unknown error occurred while saving transcript:",
+  //         error
+  //       );
+  //     }
+  //   }
 };
 
 // -- PUT TRANSCRIPT IN METADATA --
@@ -374,7 +389,9 @@ const main = async () => {
   const ivsArn: EnvVar = process.env.IVS_ARN;
   const ivsChatRoomArn: EnvVar = process.env.IVS_CHAT_ROOM_ARN;
   const livestreamID: EnvVar = process.env.LIVESTREAM_ID;
-  const playbackJWT: EnvVar = process.env.PLAYBACK_JWT;
+  const playbackPrivateKey: EnvVar = process.env.PLAYBACK_PRIVATE_KEY;
+  const playbackJWTAlgorithm: jwt.Algorithm =
+    (process.env.PLAYBACK_JWT_ALGORITHM as jwt.Algorithm) || "ES384";
   const fromLang: LanguageCode =
     (process.env.FROM_LANG as LanguageCode) || "en-IE";
   const toLangs: LanguageCode[] = process.env.TO_LANGS
@@ -388,11 +405,23 @@ const main = async () => {
     !awsIVSRegion ||
     !awsTranscribeRegion ||
     !awsTranslateRegion ||
-    !playbackJWT ||
+    !playbackPrivateKey ||
+    !playbackJWTAlgorithm ||
     !livestreamID ||
-    !ivsArn
+    !ivsArn ||
+    !domain
   ) {
-    console.error("Missing required environment variables.");
+    console.error("Missing required environment variables.", {
+      playbackUrl,
+      ivsChatRoomArn,
+      awsIVSRegion,
+      awsTranscribeRegion,
+      awsTranslateRegion,
+      playbackPrivateKey,
+      livestreamID,
+      ivsArn,
+      domain,
+    });
     process.exit(1);
   }
 
@@ -481,7 +510,13 @@ const main = async () => {
 
   // Start process
   try {
-    ffmpegProcess = setupFFmpeg({ playbackUrl, playbackJWT });
+    ffmpegProcess = setupFFmpeg({
+      playbackUrl,
+      playbackPrivateKey,
+      playbackJWTAlgorithm,
+      ivsArn,
+      domain,
+    });
     const audioStream = ffmpegProcess.stdout;
 
     const transcriptionResponse = await setupTranscription({
@@ -493,6 +528,8 @@ const main = async () => {
     if (!transcriptionResponse.TranscriptResultStream) {
       throw new Error("Failed to get a valid transcription response stream.");
     }
+
+    const badWordsFilter = new Filter();
 
     for await (const event of transcriptionResponse.TranscriptResultStream) {
       const results = event.TranscriptEvent?.Transcript?.Results;
@@ -509,11 +546,14 @@ const main = async () => {
             : null;
         if (firstAlternative) {
           const transcript = firstAlternative.Transcript;
+
           if (transcript) {
+            const cleanTranscript = badWordsFilter.clean(transcript);
+
             sendTranscriptEvent({
               ivsChatClient,
               ivsChatRoomArn,
-              transcript,
+              transcript: cleanTranscript,
               firstResult,
               languageCode: fromLang,
               ivsClient,
@@ -530,7 +570,7 @@ const main = async () => {
                     ivsChatClient,
                     ivsChatRoomArn,
                     translateClient,
-                    transcript,
+                    transcript: cleanTranscript,
                     fromLang,
                     toLang,
                     firstResult,
