@@ -194,8 +194,13 @@ const saveTranscriptToDB = async ({
   //   }
 };
 
-const isChannelNotBroadcastingError = (err: unknown) => {
+const isChannelNotBroadcastingError = (err: unknown): boolean => {
   if (!err) return false;
+  if (typeof err === "object" && err !== null && "Code" in err) {
+    // AWS SDK error shape
+    return (err as any).Code === "ChannelNotBroadcasting";
+  }
+  // Fallback to message search
   const msg =
     typeof err === "string"
       ? err
