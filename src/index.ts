@@ -471,7 +471,7 @@ const main = async () => {
         const jobData = JSON.parse(message.Body!);
         messageReceiptHandle = message.ReceiptHandle;
 
-        console.log("Job received:", jobData.livestreamId);
+        console.log("Job received:", jobData.livestreamID);
 
         console.log("-- Transcription Started --");
         const taskStartTime = Date.now();
