@@ -194,6 +194,17 @@ const saveTranscriptToDB = async ({
   //   }
 };
 
+const isChannelNotBroadcastingError = (err: unknown) => {
+  if (!err) return false;
+  const msg =
+    typeof err === "string"
+      ? err
+      : typeof err === "object" && err !== null
+      ? (err as any).code || (err as any).message || err.toString()
+      : "";
+  return typeof msg === "string" && msg.includes("ChannelNotBroadcasting");
+};
+
 // -- PUT TRANSCRIPT IN METADATA --
 const putTranscriptInMetadata = async ({
   ivsClient,
@@ -226,6 +237,10 @@ const putTranscriptInMetadata = async ({
       await ivsClient.send(command);
       return;
     } catch (err) {
+      if (isChannelNotBroadcastingError(err)) {
+        // Silently ignore this error, do not retry
+        return;
+      }
       attempts++;
       console.error(`Failed to send IVS metadata (attempt ${attempts}):`, err);
       if (attempts >= maxAttempts) {
