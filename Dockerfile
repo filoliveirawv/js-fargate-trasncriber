@@ -1,22 +1,27 @@
-# ---- Stage 1: Build ----
-# This stage compiles the TypeScript code into JavaScript
-FROM node:18 as builder
+# ---- Build ----
+FROM node:22-bookworm-slim AS builder
+
 WORKDIR /usr/src/app
+
 COPY package*.json ./
 RUN npm install
+
 COPY . .
 RUN npm run build
 
-# ---- Stage 2: Run ----
-# This stage creates the final, lean image for production
-FROM node:18-slim
-# Install FFmpeg
-RUN apt-get update && apt-get install -y ffmpeg
+# ---- Run ----
+FROM node:22-bookworm-slim
+
+RUN apt-get update \
+    && apt-get -y dist-upgrade \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /usr/src/app
-# Copy only production dependencies
+
 COPY package*.json ./
-RUN npm install --production
-# Copy the compiled JavaScript from the 'builder' stage
+RUN npm install --omit=dev
+
 COPY --from=builder /usr/src/app/dist ./dist
-# Command to run the compiled application
+
 CMD ["node", "dist/index.js"]
