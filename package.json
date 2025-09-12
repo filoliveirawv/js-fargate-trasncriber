@@ -25,5 +25,8 @@
     "bad-words": "^4.0.0",
     "jsonwebtoken": "^9.0.2",
     "ws": "^8.18.3"
+  },
+  "engines": {
+    "node": ">=22.19.x"
   }
 }
